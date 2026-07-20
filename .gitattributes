@@ -1,0 +1,11 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Audio files
+*.ogg binary
+*.wav binary
+
+# Image files
+*.png binary
+*.jpg binary
+*.svg text
