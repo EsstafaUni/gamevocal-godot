@@ -19,7 +19,7 @@ static func sanitize_path(path: String) -> String:
 
 static func get_import_root() -> String:
 	# In the future, this could be configurable in ProjectSettings
-	return "res://gamevocal"
+	return "res://"
 
 static func get_absolute_path(relative_path: String) -> String:
 	var safe_rel = sanitize_path(relative_path)

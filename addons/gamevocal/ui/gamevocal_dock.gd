@@ -18,6 +18,10 @@ var live_sync_toggle: CheckButton
 var auto_sync_timer: Timer
 var status_api_client: GameVocalAPIClient
 
+var sync_dialog: ConfirmationDialog
+var asset_tree: Tree
+var _manifest_data_temp: Dictionary = {}
+
 func _ready():
 	_build_ui()
 	
@@ -204,6 +208,52 @@ func _build_ui():
 	status_lbl.add_theme_font_size_override("font_size", 13)
 	status_lbl.add_theme_color_override("font_color", Color(0.7, 0.7, 0.7))
 	vbox.add_child(status_lbl)
+	
+	# Sync Dialog
+	sync_dialog = ConfirmationDialog.new()
+	sync_dialog.title = "Select Assets to Sync"
+	sync_dialog.min_size = Vector2(550, 400)
+	sync_dialog.confirmed.connect(_on_sync_dialog_confirmed)
+	sync_dialog.canceled.connect(_on_sync_dialog_canceled)
+	
+	var dialog_vbox = VBoxContainer.new()
+	dialog_vbox.set_anchors_preset(PRESET_FULL_RECT)
+	dialog_vbox.size_flags_horizontal = SIZE_EXPAND_FILL
+	dialog_vbox.size_flags_vertical = SIZE_EXPAND_FILL
+	sync_dialog.add_child(dialog_vbox)
+	
+	var tree_toolbar = HBoxContainer.new()
+	tree_toolbar.add_theme_constant_override("separation", 8)
+	dialog_vbox.add_child(tree_toolbar)
+	
+	var select_all_btn = Button.new()
+	select_all_btn.text = "Select All"
+	select_all_btn.pressed.connect(_on_select_all_pressed)
+	tree_toolbar.add_child(select_all_btn)
+	
+	var select_none_btn = Button.new()
+	select_none_btn.text = "Select None"
+	select_none_btn.pressed.connect(_on_select_none_pressed)
+	tree_toolbar.add_child(select_none_btn)
+	
+	asset_tree = Tree.new()
+	asset_tree.size_flags_vertical = SIZE_EXPAND_FILL
+	asset_tree.size_flags_horizontal = SIZE_EXPAND_FILL
+	asset_tree.columns = 3
+	asset_tree.set_column_title(0, "Sync")
+	asset_tree.set_column_title(1, "Asset Path")
+	asset_tree.set_column_title(2, "Status")
+	asset_tree.set_column_titles_visible(true)
+	asset_tree.set_column_expand(0, false)
+	asset_tree.set_column_custom_minimum_width(0, 50)
+	asset_tree.set_column_expand(1, true)
+	asset_tree.set_column_expand(2, false)
+	asset_tree.set_column_custom_minimum_width(2, 100)
+	asset_tree.hide_root = true
+	asset_tree.item_edited.connect(_on_asset_tree_item_edited)
+	dialog_vbox.add_child(asset_tree)
+	
+	add_child(sync_dialog)
 
 func _set_status(msg: String, color: Color = Color(0.7, 0.7, 0.7)):
 	status_lbl.text = msg
@@ -244,7 +294,7 @@ func _on_sync_pressed():
 	if project_map.is_empty() or project_dropdown.selected < 0 or project_dropdown.selected >= project_map.size():
 		return
 	var project_id = project_map[project_dropdown.selected]
-	_set_status("Syncing...", Color(0.4, 0.8, 1.0))
+	_set_status("Fetching asset list...", Color(0.4, 0.8, 1.0))
 	sync_btn.disabled = true
 	project_dropdown.disabled = true
 	_current_request_type = "manifest"
@@ -341,16 +391,11 @@ func _handle_manifest_response(data):
 		_set_status("Invalid manifest format", Color(0.9, 0.3, 0.3))
 		return
 	
+	_manifest_data_temp = data
 	current_manifest = GameVocalProjectManifest.load_manifest()
-	if data.has("project_id"):
-		current_manifest.project_id = data["project_id"]
-	if data.has("last_sync"):
-		current_manifest.last_sync = data["last_sync"]
-	if data.has("version"):
-		current_manifest.set("last_sync_version", data["version"])
-		
-	var files_to_download = 0
-	var new_files_dict = {}
+	
+	asset_tree.clear()
+	var root = asset_tree.create_item()
 	
 	for file_entry in data["files"]:
 		var logical_path = file_entry.get("logical_path", "")
@@ -360,27 +405,123 @@ func _handle_manifest_response(data):
 		if logical_path.is_empty() or url.is_empty():
 			continue
 			
-		new_files_dict[logical_path] = checksum
-		
 		var target_path = GameVocalPathUtils.get_absolute_path(logical_path)
+		var status_text = "Missing"
+		var status_color = Color(0.9, 0.3, 0.3)
 		var needs_download = true
 		
 		if current_manifest.files.has(logical_path):
 			if current_manifest.files[logical_path] == checksum:
-				# Ensure it wasn't manually deleted by the user!
 				if FileAccess.file_exists(target_path):
 					needs_download = false
-				
-		if needs_download:
-			download_manager.queue_download(url, target_path)
-			files_to_download += 1
+					status_text = "Up to date"
+					status_color = Color(0.4, 0.8, 0.4)
+			else:
+				status_text = "Out of date"
+				status_color = Color(0.8, 0.6, 0.2)
+		
+		var item = asset_tree.create_item(root)
+		item.set_cell_mode(0, TreeItem.CELL_MODE_CHECK)
+		item.set_checked(0, needs_download) # Check missing/out of date by default
+		item.set_editable(0, true)
+		
+		item.set_text(1, logical_path)
+		
+		item.set_text(2, status_text)
+		item.set_custom_color(2, status_color)
+		
+		item.set_metadata(0, {
+			"url": url,
+			"target_path": target_path,
+			"logical_path": logical_path,
+			"checksum": checksum
+		})
+	
+	sync_dialog.popup_centered()
+	_update_sync_dialog_ok_button()
+	_set_status("Select assets to sync...", Color(0.7, 0.7, 0.7))
+
+func _on_asset_tree_item_edited():
+	_update_sync_dialog_ok_button()
+
+func _update_sync_dialog_ok_button():
+	var count = 0
+	var root = asset_tree.get_root()
+	if root:
+		var item = root.get_first_child()
+		while item:
+			if item.is_checked(0):
+				count += 1
+			item = item.get_next()
 			
+	var ok_btn = sync_dialog.get_ok_button()
+	if count > 0:
+		ok_btn.text = "Sync " + str(count) + " Assets"
+		ok_btn.disabled = false
+	else:
+		ok_btn.text = "Sync Selected"
+		ok_btn.disabled = true
+
+func _on_sync_dialog_confirmed():
+	var root = asset_tree.get_root()
+	if not root:
+		_on_sync_dialog_canceled()
+		return
+		
+	var files_to_download = 0
+	var new_files_dict = {}
+	
+	# Preserve existing checksums only for files that are still in the remote manifest
+	if _manifest_data_temp.has("files"):
+		for file_entry in _manifest_data_temp["files"]:
+			var lp = file_entry.get("logical_path", "")
+			if not lp.is_empty() and current_manifest.files.has(lp):
+				new_files_dict[lp] = current_manifest.files[lp]
+	
+	var item = root.get_first_child()
+	while item:
+		if item.is_checked(0):
+			var meta = item.get_metadata(0)
+			download_manager.queue_download(meta["url"], meta["target_path"])
+			# Update checksum for synced items
+			new_files_dict[meta["logical_path"]] = meta["checksum"]
+			files_to_download += 1
+		item = item.get_next()
+		
 	current_manifest.files = new_files_dict
+	
+	if _manifest_data_temp.has("project_id"):
+		current_manifest.project_id = _manifest_data_temp["project_id"]
+	if _manifest_data_temp.has("last_sync"):
+		current_manifest.last_sync = _manifest_data_temp["last_sync"]
+	if _manifest_data_temp.has("version"):
+		current_manifest.set("last_sync_version", _manifest_data_temp["version"])
 	
 	if files_to_download > 0:
 		_set_status("Downloading " + str(files_to_download) + " files...", Color(0.4, 0.8, 1.0))
 	else:
 		_on_all_downloads_completed()
+
+func _on_sync_dialog_canceled():
+	sync_btn.disabled = false
+	if not project_map.is_empty():
+		project_dropdown.disabled = false
+	_set_status("Ready to sync.", Color(0.7, 0.7, 0.7))
+
+func _on_select_all_pressed():
+	_set_all_tree_items_checked(true)
+
+func _on_select_none_pressed():
+	_set_all_tree_items_checked(false)
+
+func _set_all_tree_items_checked(checked: bool):
+	var root = asset_tree.get_root()
+	if root:
+		var item = root.get_first_child()
+		while item:
+			item.set_checked(0, checked)
+			item = item.get_next()
+	_update_sync_dialog_ok_button()
 
 func _on_all_downloads_completed():
 	if current_manifest:
