@@ -7,6 +7,7 @@ extends Resource
 
 @export var project_id: String = ""
 @export var last_sync: String = ""
+@export var last_sync_version: String = ""
 @export var files: Dictionary = {}
 
 const MANIFEST_PATH = "user://gamevocal_project_manifest.tres"
